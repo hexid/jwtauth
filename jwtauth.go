@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -24,28 +23,23 @@ type JwtAuth struct {
 	parser    *jwt.Parser
 }
 
-type Token struct {
-	*jwt.Token
-	Claims Claims
-}
-
 // New creates a JwtAuth authenticator instance that provides middleware handlers
 // and encoding/decoding functions for JWT signing.
-func New(alg string, signKey []byte, verifyKey []byte) *JwtAuth {
+func New(signer jwt.SigningMethod, signKey []byte, verifyKey []byte) *JwtAuth {
 	return &JwtAuth{
 		signKey:   signKey,
 		verifyKey: verifyKey,
-		signer:    jwt.GetSigningMethod(alg),
+		signer:    signer,
 	}
 }
 
 // NewWithParser is the same as New, except it supports custom parser settings
 // introduced in ver. 2.4.0 of jwt-go
-func NewWithParser(alg string, parser *jwt.Parser, signKey []byte, verifyKey []byte) *JwtAuth {
+func NewWithParser(signer jwt.SigningMethod, parser *jwt.Parser, signKey []byte, verifyKey []byte) *JwtAuth {
 	return &JwtAuth{
 		signKey:   signKey,
 		verifyKey: verifyKey,
-		signer:    jwt.GetSigningMethod(alg),
+		signer:    signer,
 		parser:    parser,
 	}
 }
@@ -71,9 +65,9 @@ func (ja *JwtAuth) Verifier(next http.Handler) http.Handler {
 func (ja *JwtAuth) Verify(paramAliases ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		hfn := func(w http.ResponseWriter, r *http.Request) {
-
 			var tokenStr string
 			var err error
+			var token *jwt.Token
 
 			// Get token from query params
 			tokenStr = r.URL.Query().Get("jwt")
@@ -98,101 +92,52 @@ func (ja *JwtAuth) Verify(paramAliases ...string) func(http.Handler) http.Handle
 
 			// Get token from cookie
 			if tokenStr == "" {
-				cookie, err := r.Cookie("jwt")
-				if err == nil {
+				if cookie, cookieErr := r.Cookie("jwt"); cookieErr == nil {
 					tokenStr = cookie.Value
 				}
 			}
 
-			// Token is required, cya
 			if tokenStr == "" {
 				err = ErrUnauthorized
-			}
-
-			// The request context
-			ctx := r.Context()
-
-			// Verify the token
-			token, err := ja.Decode(tokenStr)
-			if err != nil {
+			} else if token, err = ja.Decode(tokenStr); err != nil {
+				// Verify the token
 				switch err.Error() {
 				case "Token is expired":
 					err = ErrExpired
 				}
-
-				ctx = ja.SetContext(ctx, token, err)
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-
-			if token == nil || !token.Valid || token.Method != ja.signer {
+			} else if token == nil || !token.Valid || token.Method != ja.signer {
 				err = ErrUnauthorized
-				ctx = ja.SetContext(ctx, token, err)
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-
-			// Check expiry via "exp" claim
-			if ja.IsExpired(token) {
+			} else if IsExpired(token) {
+				// Check expiry via "exp" claim
 				err = ErrExpired
-				ctx = ja.SetContext(ctx, token, err)
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
 			}
 
-			// Valid! pass it down the context to an authenticator middleware
-			ctx = ja.SetContext(ctx, token, err)
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, "jwt", token)
+			ctx = context.WithValue(ctx, "jwt.err", err)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		}
 		return http.HandlerFunc(hfn)
 	}
 }
 
-func (ja *JwtAuth) SetContext(ctx context.Context, t *jwt.Token, err error) context.Context {
-	var jaToken *Token
-	if t != nil {
-		jaToken = &Token{Token: t, Claims: t.Claims.(Claims)}
-	}
-	_ = jaToken
-	ctx = context.WithValue(ctx, "jwt", jaToken)
-	ctx = context.WithValue(ctx, "jwt.err", err)
-	return ctx
-}
-
-func (ja *JwtAuth) Encode(claims Claims) (t *jwt.Token, tokenString string, err error) {
-	t = jwt.New(ja.signer)
-	t.Claims = claims
+func (ja *JwtAuth) Encode(claims jwt.Claims) (t *jwt.Token, tokenString string, err error) {
+	t = jwt.NewWithClaims(ja.signer, claims)
 	tokenString, err = t.SignedString(ja.signKey)
-	t.Raw = tokenString
+	// t.Raw = tokenString
 	return
 }
 
-func (ja *JwtAuth) Decode(tokenString string) (t *jwt.Token, err error) {
+func (ja *JwtAuth) Decode(tokenString string) (*jwt.Token, error) {
 	// Decode the tokenString, but avoid using custom Claims via jwt-go's
 	// ParseWithClaims as the jwt-go types will cause some glitches, so easier
 	// to decode as MapClaims then wrap the underlying map[string]interface{}
 	// to our Claims type
-	// if ja.parser != nil {
-	// 	t, err = ja.parser.Parse(tokenString, ja.keyFunc)
-	// }
-	// t, err = jwt.Parse(tokenString, ja.keyFunc)
-	// if err != nil {
-	// 	log.Println("!!EERR", err)
-	// 	return nil, err
-	// }
-
-	t, err = jwt.ParseWithClaims(tokenString, Claims{}, ja.keyFunc)
-	if err != nil {
-		log.Println("!!EERR", err)
-		return nil, err
+	parse := jwt.Parse
+	if ja.parser != nil {
+		parse = ja.parser.Parse
 	}
-
-	// Wrap type to jwtauth.Claims
-	// claims := Claims(t.Claims.(jwt.MapClaims))
-	// t.Claims = claims
-
-	return
-
+	return parse(tokenString, ja.keyFunc)
 }
 
 func (ja *JwtAuth) keyFunc(t *jwt.Token) (interface{}, error) {
@@ -203,8 +148,44 @@ func (ja *JwtAuth) keyFunc(t *jwt.Token) (interface{}, error) {
 	}
 }
 
-func (ja *JwtAuth) IsExpired(t *jwt.Token) bool {
-	claims := t.Claims.(Claims)
+// Authenticator is a default authentication middleware to enforce access following
+// the Verifier middleware. The Authenticator sends a 401 Unauthorized response for
+// all unverified tokens and passes the good ones through. It's just fine until you
+// decide to write something similar and customize your client response.
+func Authenticator(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		if jwtErr, ok := ctx.Value("jwt.err").(error); ok {
+			if jwtErr != nil {
+				http.Error(w, http.StatusText(401), 401)
+				return
+			}
+		}
+
+		jwtToken, ok := ctx.Value("jwt").(*jwt.Token)
+		if !ok || jwtToken == nil || !jwtToken.Valid {
+			http.Error(w, http.StatusText(401), 401)
+			return
+		}
+
+		// Token is authenticated, pass it through
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// Helper function that returns the NumericDate time value used by the spec
+func EpochNow() int64 {
+	return time.Now().UTC().Unix()
+}
+
+// Helper function to return calculated time in the future for "exp" claim.
+func ExpireIn(tm time.Duration) int64 {
+	return EpochNow() + int64(tm.Seconds())
+}
+
+func IsExpired(t *jwt.Token) bool {
+	claims := t.Claims.(jwt.MapClaims)
 
 	if expv, ok := claims["exp"]; ok {
 		var exp int64
@@ -224,88 +205,4 @@ func (ja *JwtAuth) IsExpired(t *jwt.Token) bool {
 	}
 
 	return false
-}
-
-// Authenticator is a default authentication middleware to enforce access following
-// the Verifier middleware. The Authenticator sends a 401 Unauthorized response for
-// all unverified tokens and passes the good ones through. It's just fine until you
-// decide to write something similar and customize your client response.
-func Authenticator(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		if jwtErr, ok := ctx.Value("jwt.err").(error); ok {
-			if jwtErr != nil {
-				http.Error(w, http.StatusText(401), 401)
-				return
-			}
-		}
-
-		// jwtToken, ok := ctx.Value("jwt").(*jwt.Token)
-		jwtToken, ok := ctx.Value("jwt").(*Token)
-
-		if !ok || jwtToken == nil || !jwtToken.Valid {
-			http.Error(w, http.StatusText(401), 401)
-			return
-		}
-
-		// Token is authenticated, pass it through
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// Claims is a convenience type to manage a JWT claims hash.
-type Claims map[string]interface{}
-
-// NOTE: as of v3.0 of jwt-go, Valid() interface method is called to verify
-// the claims. However, the current design we test these claims in the
-// Verifier middleware, so we skip this step. Now with v3.0, there is
-// some potential for some minor improvements to our design.
-func (c Claims) Valid() error {
-	return nil
-}
-
-func (c Claims) Set(k string, v interface{}) Claims {
-	c[k] = v
-	return c
-}
-
-func (c Claims) Get(k string) (interface{}, bool) {
-	v, ok := c[k]
-	return v, ok
-}
-
-// Set issued at ("iat") to specified time in the claims
-func (c Claims) SetIssuedAt(tm time.Time) Claims {
-	c["iat"] = tm.UTC().Unix()
-	return c
-}
-
-// Set issued at ("iat") to present time in the claims
-func (c Claims) SetIssuedNow() Claims {
-	c["iat"] = EpochNow()
-	return c
-}
-
-// Set expiry ("exp") in the claims and return itself so it can be chained
-func (c Claims) SetExpiry(tm time.Time) Claims {
-	c["exp"] = tm.UTC().Unix()
-	return c
-}
-
-// Set expiry ("exp") in the claims to some duration from the present time
-// and return itself so it can be chained
-func (c Claims) SetExpiryIn(tm time.Duration) Claims {
-	c["exp"] = ExpireIn(tm)
-	return c
-}
-
-// Helper function that returns the NumericDate time value used by the spec
-func EpochNow() int64 {
-	return time.Now().UTC().Unix()
-}
-
-// Helper function to return calculated time in the future for "exp" claim.
-func ExpireIn(tm time.Duration) int64 {
-	return EpochNow() + int64(tm.Seconds())
 }

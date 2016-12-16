@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
-	"github.com/goware/jwtauth"
+	"github.com/hexid/jwtauth"
 	"github.com/pressly/chi"
 )
 
@@ -20,7 +20,7 @@ var (
 )
 
 func init() {
-	TokenAuth = jwtauth.New("HS256", TokenSecret, nil)
+	TokenAuth = jwtauth.New(jwt.SigningMethodHS256, TokenSecret, nil)
 }
 
 //
@@ -45,7 +45,7 @@ func TestSimple(t *testing.T) {
 	}
 
 	h := http.Header{}
-	h.Set("Authorization", "BEARER "+newJwtToken([]byte("wrong"), map[string]interface{}{}))
+	h.Set("Authorization", "BEARER "+newJwtToken([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
 		t.Fatalf(resp)
 	}
@@ -54,12 +54,12 @@ func TestSimple(t *testing.T) {
 		t.Fatalf(resp)
 	}
 	// wrong token secret and wrong alg
-	h.Set("Authorization", "BEARER "+newJwt512Token([]byte("wrong"), map[string]interface{}{}))
+	h.Set("Authorization", "BEARER "+newJwt512Token([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
 		t.Fatalf(resp)
 	}
 	// correct token secret but wrong alg
-	h.Set("Authorization", "BEARER "+newJwt512Token(TokenSecret, map[string]interface{}{}))
+	h.Set("Authorization", "BEARER "+newJwt512Token(TokenSecret, &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
 		t.Fatalf(resp)
 	}
@@ -129,7 +129,7 @@ func TestMore(t *testing.T) {
 	}
 
 	h := http.Header{}
-	h.Set("Authorization", "BEARER "+newJwtToken([]byte("wrong"), map[string]interface{}{}))
+	h.Set("Authorization", "BEARER "+newJwtToken([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
 		t.Fatalf(resp)
 	}
@@ -138,17 +138,17 @@ func TestMore(t *testing.T) {
 		t.Fatalf(resp)
 	}
 	// wrong token secret and wrong alg
-	h.Set("Authorization", "BEARER "+newJwt512Token([]byte("wrong"), map[string]interface{}{}))
+	h.Set("Authorization", "BEARER "+newJwt512Token([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
 		t.Fatalf(resp)
 	}
 	// correct token secret but wrong alg
-	h.Set("Authorization", "BEARER "+newJwt512Token(TokenSecret, map[string]interface{}{}))
+	h.Set("Authorization", "BEARER "+newJwt512Token(TokenSecret, &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
 		t.Fatalf(resp)
 	}
 
-	h = newAuthHeader((jwtauth.Claims{}).Set("exp", jwtauth.EpochNow()-1000))
+	h = newAuthHeader(&jwt.StandardClaims{ExpiresAt: jwtauth.EpochNow() - 1000})
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "expired\n" {
 		t.Fatalf(resp)
 	}
@@ -158,7 +158,7 @@ func TestMore(t *testing.T) {
 		t.Fatalf(resp)
 	}
 
-	h = newAuthHeader((jwtauth.Claims{}).SetExpiryIn(5 * time.Minute))
+	h = newAuthHeader(&jwt.StandardClaims{ExpiresAt: jwtauth.ExpireIn(5 * time.Minute)})
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 200 && resp != "protected" {
 		t.Fatalf(resp)
 	}
@@ -197,7 +197,7 @@ func testRequest(t *testing.T, ts *httptest.Server, method, path string, header 
 	return resp.StatusCode, string(respBody)
 }
 
-func newJwtToken(secret []byte, optClaims ...jwtauth.Claims) string {
+func newJwtToken(secret []byte, optClaims ...jwt.Claims) string {
 	token := jwt.New(jwt.GetSigningMethod("HS256"))
 	if len(optClaims) > 0 {
 		token.Claims = optClaims[0]
@@ -209,7 +209,7 @@ func newJwtToken(secret []byte, optClaims ...jwtauth.Claims) string {
 	return tokenStr
 }
 
-func newJwt512Token(secret []byte, optClaims ...jwtauth.Claims) string {
+func newJwt512Token(secret []byte, optClaims ...jwt.Claims) string {
 	// use-case: when token is signed with a different alg than expected
 	token := jwt.New(jwt.GetSigningMethod("HS512"))
 	if len(optClaims) > 0 {
@@ -222,7 +222,7 @@ func newJwt512Token(secret []byte, optClaims ...jwtauth.Claims) string {
 	return tokenStr
 }
 
-func newAuthHeader(optClaims ...jwtauth.Claims) http.Header {
+func newAuthHeader(optClaims ...jwt.Claims) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "BEARER "+newJwtToken(TokenSecret, optClaims...))
 	return h
