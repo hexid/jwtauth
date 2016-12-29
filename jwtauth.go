@@ -2,8 +2,7 @@ package jwtauth
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -11,9 +10,11 @@ import (
 	"github.com/dgrijalva/jwt-go"
 )
 
-var (
-	ErrUnauthorized = errors.New("jwtauth: unauthorized token")
-	ErrExpired      = errors.New("jwtauth: expired token")
+type contextKey int
+
+const (
+	JwtContextKey contextKey = iota
+	JwtErrContextKey
 )
 
 type JwtAuth struct {
@@ -68,6 +69,7 @@ func (ja *JwtAuth) Verify(paramAliases ...string) func(http.Handler) http.Handle
 			var tokenStr string
 			var err error
 			var token *jwt.Token
+			var ctx context.Context
 
 			// Get token from query params
 			tokenStr = r.URL.Query().Get("jwt")
@@ -97,42 +99,38 @@ func (ja *JwtAuth) Verify(paramAliases ...string) func(http.Handler) http.Handle
 				}
 			}
 
-			if tokenStr == "" {
-				err = ErrUnauthorized
-			} else if token, err = ja.Decode(tokenStr); err != nil {
-				// Verify the token
-				switch err.Error() {
-				case "Token is expired":
-					err = ErrExpired
+			if token, err = ja.Decode(tokenStr); token != nil {
+				if token.Method != ja.signer {
+					err = &jwt.ValidationError{
+						Inner:  fmt.Errorf("token signing method %v does not match %v", token.Method, ja.signer),
+						Errors: jwt.ValidationErrorSignatureInvalid,
+					}
 				}
-			} else if token == nil || !token.Valid || token.Method != ja.signer {
-				err = ErrUnauthorized
-			} else if IsExpired(token) {
-				// Check expiry via "exp" claim
-				err = ErrExpired
+			} else if token == nil {
+				err = &jwt.ValidationError{
+					Inner:  fmt.Errorf("token parsing failed unexpectedly"),
+					Errors: jwt.ValidationErrorMalformed,
+				}
 			}
 
-			ctx := r.Context()
-			ctx = context.WithValue(ctx, "jwt", token)
-			ctx = context.WithValue(ctx, "jwt.err", err)
+			ctx = r.Context()
+			ctx = context.WithValue(ctx, JwtContextKey, token)
+			ctx = context.WithValue(ctx, JwtErrContextKey, err)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		}
 		return http.HandlerFunc(hfn)
 	}
 }
 
-func (ja *JwtAuth) Encode(claims jwt.Claims) (t *jwt.Token, tokenString string, err error) {
-	t = jwt.NewWithClaims(ja.signer, claims)
-	tokenString, err = t.SignedString(ja.signKey)
-	// t.Raw = tokenString
-	return
+func (ja *JwtAuth) Encode(claims jwt.Claims) (*jwt.Token, string, error) {
+	t := jwt.NewWithClaims(ja.signer, claims)
+	tokenString, err := t.SignedString(ja.signKey)
+	t.Raw = tokenString
+	return t, tokenString, err
 }
 
+// Decode the tokenString with the default parser, unless another is provided.
 func (ja *JwtAuth) Decode(tokenString string) (*jwt.Token, error) {
-	// Decode the tokenString, but avoid using custom Claims via jwt-go's
-	// ParseWithClaims as the jwt-go types will cause some glitches, so easier
-	// to decode as MapClaims then wrap the underlying map[string]interface{}
-	// to our Claims type
 	parse := jwt.Parse
 	if ja.parser != nil {
 		parse = ja.parser.Parse
@@ -143,9 +141,8 @@ func (ja *JwtAuth) Decode(tokenString string) (*jwt.Token, error) {
 func (ja *JwtAuth) keyFunc(t *jwt.Token) (interface{}, error) {
 	if ja.verifyKey != nil && len(ja.verifyKey) > 0 {
 		return ja.verifyKey, nil
-	} else {
-		return ja.signKey, nil
 	}
+	return ja.signKey, nil
 }
 
 // Authenticator is a default authentication middleware to enforce access following
@@ -156,18 +153,16 @@ func Authenticator(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		if jwtErr, ok := ctx.Value("jwt.err").(error); ok {
-			if jwtErr != nil {
-				http.Error(w, http.StatusText(401), 401)
-				return
-			}
-		}
-
-		jwtToken, ok := ctx.Value("jwt").(*jwt.Token)
-		if !ok || jwtToken == nil || !jwtToken.Valid {
+		if jwtErr, ok := ctx.Value(JwtErrContextKey).(error); ok && jwtErr != nil {
 			http.Error(w, http.StatusText(401), 401)
 			return
 		}
+
+		// jwtToken, ok := ctx.Value(JwtContextKey).(*jwt.Token)
+		// if !ok || jwtToken == nil || !jwtToken.Valid {
+		// 	http.Error(w, http.StatusText(401), 401)
+		// 	return
+		// }
 
 		// Token is authenticated, pass it through
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -182,27 +177,4 @@ func EpochNow() int64 {
 // Helper function to return calculated time in the future for "exp" claim.
 func ExpireIn(tm time.Duration) int64 {
 	return EpochNow() + int64(tm.Seconds())
-}
-
-func IsExpired(t *jwt.Token) bool {
-	claims := t.Claims.(jwt.MapClaims)
-
-	if expv, ok := claims["exp"]; ok {
-		var exp int64
-		switch v := expv.(type) {
-		case float64:
-			exp = int64(v)
-		case int64:
-			exp = v
-		case json.Number:
-			exp, _ = v.Int64()
-		default:
-		}
-
-		if exp < EpochNow() {
-			return true
-		}
-	}
-
-	return false
 }

@@ -41,32 +41,32 @@ func TestSimple(t *testing.T) {
 
 	// sending unauthorized requests
 	if status, resp := testRequest(t, ts, "GET", "/", nil, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 
 	h := http.Header{}
 	h.Set("Authorization", "BEARER "+newJwtToken([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 	h.Set("Authorization", "BEARER asdf")
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 	// wrong token secret and wrong alg
 	h.Set("Authorization", "BEARER "+newJwt512Token([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 	// correct token secret but wrong alg
 	h.Set("Authorization", "BEARER "+newJwt512Token(TokenSecret, &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 
 	// sending authorized requests
 	if status, resp := testRequest(t, ts, "GET", "/", newAuthHeader(), nil); status != 200 && resp != "welcome" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 }
 
@@ -75,38 +75,7 @@ func TestMore(t *testing.T) {
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
-		r.Use(TokenAuth.Verifier)
-
-		authenticator := func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ctx := r.Context()
-				if jwtErr, ok := ctx.Value("jwt.err").(error); ok {
-					switch jwtErr {
-					default:
-						http.Error(w, http.StatusText(401), 401)
-						return
-					case jwtauth.ErrExpired:
-						http.Error(w, "expired", 401)
-						return
-					case jwtauth.ErrUnauthorized:
-						http.Error(w, http.StatusText(401), 401)
-						return
-					case nil:
-						// no error
-					}
-				}
-
-				jwtToken, ok := ctx.Value("jwt").(*jwt.Token)
-				if !ok || jwtToken == nil || !jwtToken.Valid {
-					http.Error(w, http.StatusText(401), 401)
-					return
-				}
-
-				// Token is authenticated, pass it through
-				next.ServeHTTP(w, r.WithContext(ctx))
-			})
-		}
-		r.Use(authenticator)
+		r.Use(TokenAuth.Verifier, jwtauth.Authenticator)
 
 		r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("protected"))
@@ -131,36 +100,46 @@ func TestMore(t *testing.T) {
 	h := http.Header{}
 	h.Set("Authorization", "BEARER "+newJwtToken([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 	h.Set("Authorization", "BEARER asdf")
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 	// wrong token secret and wrong alg
 	h.Set("Authorization", "BEARER "+newJwt512Token([]byte("wrong"), &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 	// correct token secret but wrong alg
 	h.Set("Authorization", "BEARER "+newJwt512Token(TokenSecret, &jwt.StandardClaims{}))
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "Unauthorized\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 
 	h = newAuthHeader(&jwt.StandardClaims{ExpiresAt: jwtauth.EpochNow() - 1000})
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 401 && resp != "expired\n" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 
 	// sending authorized requests
 	if status, resp := testRequest(t, ts, "GET", "/", nil, nil); status != 200 && resp != "welcome" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
 	}
 
 	h = newAuthHeader(&jwt.StandardClaims{ExpiresAt: jwtauth.ExpireIn(5 * time.Minute)})
 	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 200 && resp != "protected" {
-		t.Fatalf(resp)
+		t.Fatal(resp)
+	}
+
+	_, tokenStr, err := TokenAuth.Encode(&jwt.StandardClaims{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = http.Header{}
+	h.Set("Cookie", "jwt="+tokenStr)
+	if status, resp := testRequest(t, ts, "GET", "/admin", h, nil); status != 200 && resp != "protected" {
+		t.Fatal(resp)
 	}
 }
 
