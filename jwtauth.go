@@ -18,15 +18,15 @@ const (
 )
 
 type JwtAuth struct {
-	signKey   []byte
-	verifyKey []byte
+	signKey   interface{}
+	verifyKey interface{}
 	signer    jwt.SigningMethod
 	parser    *jwt.Parser
 }
 
 // New creates a JwtAuth authenticator instance that provides middleware handlers
 // and encoding/decoding functions for JWT signing.
-func New(signer jwt.SigningMethod, signKey []byte, verifyKey []byte) *JwtAuth {
+func New(signer jwt.SigningMethod, signKey, verifyKey interface{}) *JwtAuth {
 	return &JwtAuth{
 		signKey:   signKey,
 		verifyKey: verifyKey,
@@ -36,7 +36,7 @@ func New(signer jwt.SigningMethod, signKey []byte, verifyKey []byte) *JwtAuth {
 
 // NewWithParser is the same as New, except it supports custom parser settings
 // introduced in ver. 2.4.0 of jwt-go
-func NewWithParser(signer jwt.SigningMethod, parser *jwt.Parser, signKey []byte, verifyKey []byte) *JwtAuth {
+func NewWithParser(signer jwt.SigningMethod, parser *jwt.Parser, signKey, verifyKey interface{}) *JwtAuth {
 	return &JwtAuth{
 		signKey:   signKey,
 		verifyKey: verifyKey,
@@ -139,7 +139,7 @@ func (ja *JwtAuth) Decode(tokenString string) (*jwt.Token, error) {
 }
 
 func (ja *JwtAuth) keyFunc(t *jwt.Token) (interface{}, error) {
-	if ja.verifyKey != nil && len(ja.verifyKey) > 0 {
+	if ja.verifyKey != nil {
 		return ja.verifyKey, nil
 	}
 	return ja.signKey, nil
